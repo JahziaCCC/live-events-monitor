@@ -4,22 +4,31 @@ import os
 import hashlib
 from deep_translator import GoogleTranslator
 
+# ===============================
+# Telegram settings
+# ===============================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+# ===============================
+# LiveUAMap feed
+# ===============================
 FEED_URL = "https://iran.liveuamap.com/en/data.json"
 STATE_FILE = "seen_hashes.json"
 
-# كلمات تشغيل مهمة (تقدر تزيد/تنقص)
+# ===============================
+# Smart keywords (important news only)
+# ===============================
 KEYWORDS = [
-    "explosion","attack","missile","drone",
-    "clash","fire","alert","security",
-    "strike","airstrike","shelling"
+    "explosion", "attack", "missile", "drone",
+    "clash", "fire", "alert", "security",
+    "strike", "airstrike", "shelling"
 ]
 
-def send_telegram(msg: str):
-    if not TOKEN or not CHAT_ID:
-        raise RuntimeError("Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID in environment secrets.")
+# ===============================
+# Telegram sender
+# ===============================
+def send_telegram(msg):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     requests.post(url, data={
         "chat_id": CHAT_ID,
@@ -28,65 +37,90 @@ def send_telegram(msg: str):
         "disable_web_page_preview": True
     }, timeout=30)
 
-def translate(text: str) -> str:
+# ===============================
+# Translation
+# ===============================
+def translate(text):
     if not text:
         return ""
     try:
         return GoogleTranslator(source="auto", target="ar").translate(text)
-    except Exception:
+    except:
         return text
 
+# ===============================
+# Load saved hashes
+# ===============================
 def load_seen():
     if not os.path.exists(STATE_FILE):
         return []
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except:
         return []
 
 def save_seen(data):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
 
-def important(text: str) -> bool:
-    t = (text or "").lower()
-    return any(k in t for k in KEYWORDS)
+# ===============================
+# Smart filter
+# ===============================
+def important(text):
+    text = (text or "").lower()
+    return any(k in text for k in KEYWORDS)
 
-def make_hash(text: str) -> str:
-    return hashlib.md5((text or "").encode("utf-8")).hexdigest()
+# ===============================
+# Hash generator
+# ===============================
+def make_hash(text):
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
 
+# ===============================
+# Fetch events (FIX 403 ERROR)
+# ===============================
 def fetch_events():
-    r = requests.get(FEED_URL, timeout=30)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Referer": "https://iran.liveuamap.com/",
+    }
+
+    r = requests.get(FEED_URL, headers=headers, timeout=30)
     r.raise_for_status()
     data = r.json()
     return data.get("features", [])
 
+# ===============================
+# Main
+# ===============================
 def main():
     seen = load_seen()
     events = fetch_events()
+
     new_seen = list(seen)
 
     for ev in events:
         props = ev.get("properties", {}) or {}
 
-        title = props.get("title", "") or ""
-        desc = props.get("description", "") or ""
-        time = props.get("time", "") or ""
-        link = props.get("url", "https://iran.liveuamap.com") or "https://iran.liveuamap.com"
+        title = props.get("title", "")
+        desc = props.get("description", "")
+        time = props.get("time", "")
+        link = props.get("url", "https://iran.liveuamap.com")
 
         full_text = f"{title} {desc}".strip()
         h = make_hash(full_text)
 
-        # منع تكرار
+        # prevent duplicates
         if h in seen:
             continue
 
-        # فلترة ذكية
+        # smart filtering
         if not important(full_text):
             continue
 
-        # ترجمة كاملة
+        # translate
         title_ar = translate(title)
         desc_ar = translate(desc)
 
@@ -95,14 +129,14 @@ def main():
             f"📰 الخبر:\n{title_ar}\n\n"
             f"📄 التفاصيل:\n{desc_ar}\n\n"
             f"🕒 الوقت:\n{time}\n\n"
-            f"🔗 المصدر:\n{link}\n"
+            f"🔗 المصدر:\n{link}"
         )
 
         send_telegram(msg)
         new_seen.append(h)
 
-    # خفّف حجم الحالة
     save_seen(new_seen[-300:])
 
+# ===============================
 if __name__ == "__main__":
     main()
