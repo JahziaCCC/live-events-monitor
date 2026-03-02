@@ -7,15 +7,14 @@ from deep_translator import GoogleTranslator
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# RSS feed (بديل data.json)
-FEED_URL = "https://iran.liveuamap.com/rss"
+# Google News search (Iran security related)
+FEED_URL = "https://news.google.com/rss/search?q=iran+explosion+attack+missile&hl=en-US&gl=US&ceid=US:en"
 
 STATE_FILE = "seen_hashes.txt"
 
 KEYWORDS = [
     "explosion","attack","missile","drone",
-    "clash","fire","alert","security",
-    "strike","airstrike","shelling"
+    "clash","fire","strike","airstrike"
 ]
 
 # ===============================
@@ -24,7 +23,7 @@ def send_telegram(msg):
     requests.post(url, data={
         "chat_id": CHAT_ID,
         "text": msg,
-        "disable_web_page_preview": True
+        "disable_web_page_preview": False
     }, timeout=30)
 
 # ===============================
@@ -65,13 +64,11 @@ def fetch_events():
     events = []
     for item in items:
         title = item.findtext("title", "")
-        desc = item.findtext("description", "")
         link = item.findtext("link", "")
         pub = item.findtext("pubDate", "")
 
         events.append({
             "title": title,
-            "desc": desc,
             "link": link,
             "time": pub
         })
@@ -86,7 +83,7 @@ def main():
     events = fetch_events()
 
     for ev in events:
-        full_text = ev["title"] + " " + ev["desc"]
+        full_text = ev["title"]
         h = make_hash(full_text)
 
         if h in seen:
@@ -96,16 +93,12 @@ def main():
             continue
 
         title_ar = translate(ev["title"])
-        desc_ar = translate(ev["desc"])
 
         msg = f"""
-🚨 تنبيه مباشر – LiveUAMap
+🚨 تنبيه مباشر
 
 📰 الخبر:
 {title_ar}
-
-📄 التفاصيل:
-{desc_ar}
 
 🕒 الوقت:
 {ev["time"]}
