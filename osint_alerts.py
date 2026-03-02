@@ -6,65 +6,61 @@ import hashlib
 import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from deep_translator import GoogleTranslator
 
 # =========================
-# REQUIRED SECRETS (GitHub -> Settings -> Secrets -> Actions)
+# REQUIRED SECRETS
 # =========================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# GitHub built-in token + repo info (no need to create PAT)
+# GitHub Actions built-ins
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY")  # e.g. "user/repo"
 
 # =========================
 # CONFIG
 # =========================
-STATE_ISSUE_TITLE = "osint-alerts-state"  # we store seen hashes here
+STATE_ISSUE_TITLE = "osint-alerts-state"   # we store seen hashes here
 
-# Keywords for "important" filtering (you can expand)
-KEYWORDS = [
-    # English
+# Only send items within last X hours
+MAX_AGE_HOURS = 6
+
+# Max alerts per run
+MAX_ALERTS_PER_RUN = 10
+
+# MUST mention Saudi Arabia (hard filter)
+SAUDI_TERMS = [
+    "saudi", "saudi arabia", "ksa", "kingdom of saudi arabia",
+    "riyadh", "jeddah", "dammam", "dhahran", "neom", "mecca", "makkah", "medina", "madinah",
+    "السعودية", "المملكة", "المملكة العربية السعودية",
+    "الرياض", "جدة", "الدمام", "الظهران", "نيوم", "مكة", "المدينة"
+]
+
+# Optional: Keep a light "event" filter to reduce noise (you can remove if you want ALL Saudi mentions)
+EVENT_KEYWORDS = [
     "explosion", "attack", "missile", "drone", "strike", "airstrike", "shelling",
     "clash", "fire", "blast", "intercept", "sirens", "military", "navy",
-    "oil spill", "tanker", "ship seized", "seized", "houthi", "red sea",
-    "iran", "tehran", "israel", "gaza", "yemen", "iraq", "syria", "lebanon",
-    "hormuz", "bab al-mandab", "gulf", "persian gulf",
-
-    # Arabic (if found in titles/snippets)
+    "oil spill", "tanker", "ship seized", "seized", "red sea",
+    "flood", "storm", "earthquake", "wildfire",
     "انفجار", "هجوم", "صاروخ", "مسيرة", "ضربة", "اشتباك", "حريق",
-    "اعتراض", "استهداف", "احتجاز", "سفينة", "ناقلة", "تسرب", "البحر الأحمر",
-    "مضيق هرمز", "باب المندب", "الخليج"
+    "احتجاز", "سفينة", "ناقلة", "تسرب", "فيضان", "سيول", "زلزال", "حرائق"
 ]
 
-# Google News RSS queries (edit as you like)
+# Google News RSS queries (Saudi only)
 GOOGLE_NEWS_QUERIES = [
-    # Iran
-    "iran explosion OR attack OR missile OR drone",
-    # Gulf / Hormuz / maritime
-    "\"Strait of Hormuz\" OR Hormuz tanker OR ship seized OR Persian Gulf",
-    # Red Sea / Bab al-Mandab
-    "\"Red Sea\" OR \"Bab al-Mandab\" OR Houthi attack OR shipping",
-    # Iraq / Syria / Lebanon / Yemen (optional)
-    "iraq attack OR explosion OR drone",
-    "syria strike OR airstrike OR explosion",
-    "lebanon strike OR missile OR explosion",
-    "yemen strike OR missile OR drone OR red sea",
+    '("Saudi Arabia" OR Saudi OR KSA OR السعودية OR "المملكة العربية السعودية")',
 ]
 
-# GDELT (free) query - broad OSINT stream
+# GDELT query (Saudi only)
 GDELT_QUERY = (
-    '(iran OR tehran OR "strait of hormuz" OR hormuz OR "red sea" OR "bab al-mandab" '
-    'OR "persian gulf" OR gaza OR yemen OR iraq OR syria OR lebanon) '
-    'AND (explosion OR attack OR missile OR drone OR strike OR airstrike OR shelling OR seized OR tanker)'
+    '("Saudi Arabia" OR Saudi OR KSA OR السعودية OR "المملكة العربية السعودية" OR Riyadh OR Jeddah OR NEOM) '
+    'AND (attack OR explosion OR missile OR drone OR strike OR airstrike OR shelling OR fire OR flood OR earthquake OR tanker OR seized)'
 )
 
-# Time window for GDELT (minutes)
+# GDELT time window (minutes)
 GDELT_WINDOW_MIN = 60
-
-# How many items max to notify per run (anti-spam)
-MAX_ALERTS_PER_RUN = 10
 
 # =========================
 # Helpers
@@ -80,9 +76,13 @@ def norm_text(s: str) -> str:
     s = re.sub(r"\s+", " ", s)
     return s
 
-def is_important(text: str) -> bool:
+def contains_saudi(text: str) -> bool:
     t = (text or "").lower()
-    return any(k.lower() in t for k in KEYWORDS)
+    return any(term.lower() in t for term in SAUDI_TERMS)
+
+def contains_event_keyword(text: str) -> bool:
+    t = (text or "").lower()
+    return any(k.lower() in t for k in EVENT_KEYWORDS)
 
 def make_hash(*parts: str) -> str:
     base = " | ".join(norm_text(p) for p in parts if p)
@@ -121,7 +121,7 @@ def gh_headers():
 
 def get_or_create_state_issue():
     owner, repo = GITHUB_REPOSITORY.split("/", 1)
-    # search issues by title (list open issues)
+
     r = requests.get(
         f"https://api.github.com/repos/{owner}/{repo}/issues",
         headers=gh_headers(),
@@ -135,14 +135,10 @@ def get_or_create_state_issue():
         if it.get("title") == STATE_ISSUE_TITLE:
             return it["number"], it.get("body") or ""
 
-    # create issue
     r = requests.post(
         f"https://api.github.com/repos/{owner}/{repo}/issues",
         headers=gh_headers(),
-        json={
-            "title": STATE_ISSUE_TITLE,
-            "body": json.dumps({"seen": []}, ensure_ascii=False)
-        },
+        json={"title": STATE_ISSUE_TITLE, "body": json.dumps({"seen": []}, ensure_ascii=False)},
         timeout=30
     )
     r.raise_for_status()
@@ -160,10 +156,8 @@ def load_seen_hashes():
 
 def save_seen_hashes(issue_number: int, seen: set):
     owner, repo = GITHUB_REPOSITORY.split("/", 1)
-    # cap size
     seen_list = list(seen)[-3000:]
     body = json.dumps({"seen": seen_list, "updated_utc": datetime.utcnow().isoformat()}, ensure_ascii=False)
-
     r = requests.patch(
         f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}",
         headers=gh_headers(),
@@ -176,14 +170,9 @@ def save_seen_hashes(issue_number: int, seen: set):
 # Sources
 # =========================
 def fetch_google_news_rss(query: str):
-    # Google News RSS search
     url = "https://news.google.com/rss/search"
-    params = {
-        "q": query,
-        "hl": "en-US",
-        "gl": "US",
-        "ceid": "US:en"
-    }
+    params = {"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"}
+
     r = requests.get(url, params=params, timeout=30)
     r.raise_for_status()
 
@@ -197,7 +186,6 @@ def fetch_google_news_rss(query: str):
         pub = norm_text(item.findtext("pubDate", ""))
         desc = norm_text(item.findtext("description", ""))
 
-        # Keep it clean: description sometimes contains HTML
         desc = re.sub(r"<[^>]+>", "", desc).strip()
 
         out.append({
@@ -210,12 +198,9 @@ def fetch_google_news_rss(query: str):
     return out
 
 def fetch_gdelt():
-    # GDELT DOC 2.1 API (free)
-    # https://blog.gdeltproject.org/gdelt-2-1-api-debuts/
     end = datetime.now(timezone.utc)
     start = end - timedelta(minutes=GDELT_WINDOW_MIN)
 
-    # GDELT uses "startdatetime" / "enddatetime" format YYYYMMDDHHMMSS
     def fmt(dt):
         return dt.strftime("%Y%m%d%H%M%S")
 
@@ -236,23 +221,37 @@ def fetch_gdelt():
 
     out = []
     for art in data.get("articles", []) or []:
-        title = norm_text(art.get("title", ""))
-        link = norm_text(art.get("url", ""))
-        seendate = norm_text(art.get("seendate", ""))
-        snippet = norm_text(art.get("snippet", ""))
-
         out.append({
             "source": "GDELT",
-            "title": title,
-            "desc": snippet,
-            "link": link,
-            "time": seendate,
+            "title": norm_text(art.get("title", "")),
+            "desc": norm_text(art.get("snippet", "")),
+            "link": norm_text(art.get("url", "")),
+            "time": norm_text(art.get("seendate", "")),
         })
     return out
 
 # =========================
 # Main
 # =========================
+def within_time_window(time_str: str) -> bool:
+    """
+    Filters out old news. Works well for Google News RSS pubDate.
+    If parsing fails, we allow it (to avoid missing).
+    """
+    if not time_str:
+        return True
+    try:
+        dt = parsedate_to_datetime(time_str)
+        if not dt:
+            return True
+        # Ensure UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        age_hours = (datetime.now(timezone.utc) - dt).total_seconds() / 3600
+        return age_hours <= MAX_AGE_HOURS
+    except Exception:
+        return True
+
 def main():
     must_have_env()
 
@@ -261,11 +260,11 @@ def main():
 
     events = []
 
-    # Google News (multiple queries)
+    # Google News
     for q in GOOGLE_NEWS_QUERIES:
         try:
             events.extend(fetch_google_news_rss(q))
-            time.sleep(1)  # gentle
+            time.sleep(1)
         except Exception:
             continue
 
@@ -279,37 +278,44 @@ def main():
     unique = []
     local_seen = set()
     for e in events:
-        h = make_hash(e["source"], e["title"], e.get("link", ""))
+        h = make_hash(e["source"], e.get("title", ""), e.get("link", ""))
         if h in local_seen:
             continue
         local_seen.add(h)
         e["_hash"] = h
         unique.append(e)
 
-    # Sort newest-ish (not perfect, but OK)
-    unique = unique[:200]
-
     sent = 0
     for e in unique:
         if sent >= MAX_ALERTS_PER_RUN:
             break
 
-        full = f"{e.get('title','')} {e.get('desc','')}".strip()
+        title = e.get("title", "")
+        desc = e.get("desc", "")
+        full_text = f"{title} {desc}".strip()
 
-        # Important filter
-        if not is_important(full):
+        # 1) MUST mention Saudi
+        if not contains_saudi(full_text):
             continue
 
-        # Global dedupe (across runs)
+        # 2) Time filter (avoid old)
+        if not within_time_window(e.get("time", "")):
+            continue
+
+        # 3) Optional event filter (remove هذه الشرط إذا تبي كل خبر فيه السعودية حتى لو اقتصادي/رياضة)
+        if not contains_event_keyword(full_text):
+            continue
+
+        # 4) No duplicates across runs
         if e["_hash"] in seen:
             continue
 
-        # Translate full
-        title_ar = translate_ar(e.get("title", ""))
-        desc_ar = translate_ar(e.get("desc", ""))
+        # Translate full (title + desc)
+        title_ar = translate_ar(title)
+        desc_ar = translate_ar(desc)
 
         msg = (
-            f"🚨 تنبيه خبر (OSINT)\n"
+            "🚨 تنبيه خبر (السعودية فقط)\n"
             f"🗞 المصدر: {e.get('source','')}\n\n"
             f"📰 العنوان:\n{title_ar}\n\n"
             f"📄 التفاصيل:\n{desc_ar}\n\n"
@@ -321,7 +327,6 @@ def main():
         new_seen.add(e["_hash"])
         sent += 1
 
-    # Save state
     save_seen_hashes(issue_number, new_seen)
 
 if __name__ == "__main__":
