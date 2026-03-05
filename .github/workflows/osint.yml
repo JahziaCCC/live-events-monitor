@@ -1,11 +1,10 @@
-name: OSINT Saudi Alerts
+name: War Alerts (KSA last 3 hours)
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # كل 10 دقائق
+    - cron: "*/10 * * * *"
   workflow_dispatch:
 
-# مهم جداً — هذا يسمح بحفظ منع التكرار داخل Issue
 permissions:
   contents: read
   issues: write
@@ -13,25 +12,20 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
-      - name: Run OSINT Alerts
+      - name: Run
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-        run: |
-          python osint_alerts.py
+        run: python osint_alerts.py
